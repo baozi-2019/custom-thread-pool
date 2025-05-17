@@ -25,10 +25,19 @@ public class BlockThreadTaskQueue {
         }
     }
 
-    public Runnable poll() {
+    public void finishTask(Task task) {
         takeLock.lock();
         try {
-            while (true) {
+            calcGroupList.remove(task.calcGroup());
+        } finally {
+            takeLock.unlock();
+        }
+    }
+
+    public Task poll(boolean block) {
+        takeLock.lock();
+        try {
+            do {
                 Iterator<Task> iterator = taskList.iterator();
                 while (iterator.hasNext()) {
                     Task task = iterator.next();
@@ -39,8 +48,8 @@ public class BlockThreadTaskQueue {
                     calcGroupList.add(calcGroup);
                     return task;
                 }
-                notEmpty.await();
-            }
+                if (block) notEmpty.await();
+            } while (block);
         } catch (InterruptedException e) {
             System.out.println(e);
         } finally {

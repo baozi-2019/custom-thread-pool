@@ -20,16 +20,24 @@ public class TaskGroupThreadPool {
 
         public Worker(BlockThreadTaskQueue.Task task) {
             this.task = task;
-            this.thread = getThreadFactory().newThread(task);
+            this.thread = getThreadFactory().newThread(this);
         }
 
-        public boolean isWaiting() {
-            return this.thread.getState() == Thread.State.WAITING;
+        public void runTask(BlockThreadTaskQueue.Task task) {
+            task.run();
+            taskQueue.finishTask(task);
         }
 
         @Override
         public void run() {
-
+            if (task != null) {
+                runTask(task);
+            }
+            while (true) {
+                BlockThreadTaskQueue.Task task = taskQueue.poll(true);
+                if (task == null) break;
+                runTask(task);
+            }
         }
     }
 
@@ -44,16 +52,24 @@ public class TaskGroupThreadPool {
     }
 
     public void exec(BlockThreadTaskQueue.Task task) {
-        // 从核心线程找worker
-        Worker idleWorker = findIdleWorker(task, true);
-        if (workerRun(idleWorker)) return;
-
-        // 从附加线程找worker
-        idleWorker = findIdleWorker(task, false);
-        if (workerRun(idleWorker)) return;
-
-        // 还是找不到，丢队列里
+        // 任务丢到队列里
         taskQueue.push(task);
+
+        task = taskQueue.poll(false);
+        if (task != null) {
+            System.out.println("增加工人");
+            // 核心线程有没有空余地方
+            Worker idleWorker = findIdleWorker(task, true);
+            if (workerRun(idleWorker)) return;
+
+            // 附加线程有没有空余地方
+            idleWorker = findIdleWorker(task, false);
+            if (workerRun(idleWorker)) return;
+        }
+
+        System.out.println("没地方了");
+
+
     }
 
     private Worker findIdleWorker(BlockThreadTaskQueue.Task task, boolean inCore) {
@@ -72,17 +88,13 @@ public class TaskGroupThreadPool {
                 idleWorker = worker;
                 break;
             }
-            if (worker.isWaiting()) {
-                idleWorker = worker;
-                break;
-            }
         }
         return idleWorker;
     }
 
     private boolean workerRun(Worker worker) {
         if (worker != null) {
-            // 找到没活干的了，让它执行，并返回
+            // 新建了一个工作者，启动
             worker.thread.start();
             return true;
         }
