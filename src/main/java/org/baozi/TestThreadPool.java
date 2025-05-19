@@ -4,6 +4,7 @@ import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import org.baozi.queue.BlockThreadTaskQueue;
 
 import java.time.Duration;
+import java.util.UUID;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -24,7 +25,7 @@ public class TestThreadPool {
         ThreadFactory threadFactory = new ThreadFactoryBuilder().setNameFormat("TestThreadPool-%d").build();
         TaskGroupThreadPool taskGroupThreadPool = new TaskGroupThreadPool(2, 5, Duration.ofMinutes(5), threadFactory, new BlockThreadTaskQueue());
 
-        new Thread(() -> {
+        Thread thread = new Thread(() -> {
             while (true) {
                 try {
                     TimeUnit.MILLISECONDS.sleep(200);
@@ -34,7 +35,7 @@ public class TestThreadPool {
                 taskGroupThreadPool.exec(new BlockThreadTaskQueue.Task() {
                     @Override
                     public String calcGroup() {
-                        return "11";
+                        return UUID.randomUUID().toString();
                     }
 
                     @Override
@@ -44,11 +45,17 @@ public class TestThreadPool {
                         } catch (InterruptedException e) {
                             throw new RuntimeException(e);
                         }
-                        System.out.println("Thread name: " + Thread.currentThread().getName() + " 111111");
+                        System.out.println("Thread name: " + Thread.currentThread().getName() + " " + calcGroup());
                     }
                 });
             }
-        }).start();
+        });
+        thread.start();
 
+        thread.interrupt();
+        taskGroupThreadPool.shutdown();
+        if (!taskGroupThreadPool.awaitTermination(Duration.ofSeconds(5))) {
+            taskGroupThreadPool.shutdownNow();
+        }
     }
 }
