@@ -1,11 +1,12 @@
 package org.baozi;
 
-import org.baozi.queue.BlockThreadTaskQueue;
+import org.baozi.queue.TaskQueue;
 
 import java.time.Duration;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 
@@ -16,7 +17,10 @@ public class TaskGroupThreadPool {
     private final int coreThreadSize;
     private final ThreadFactory threadFactory;
     private final Duration keepAliveTime;
-    private final BlockThreadTaskQueue taskQueue;
+    private final TaskQueue taskQueue;
+
+//    private final ReentrantLock pollLock = new ReentrantLock();
+//    private final Condition pollCondition = pollLock.newCondition();
 
     private final ReentrantLock mainLock = new ReentrantLock();
     private final Condition mainCondition = mainLock.newCondition();
@@ -29,16 +33,20 @@ public class TaskGroupThreadPool {
 
     class Worker implements Runnable {
         private final Thread thread;
-        private final BlockThreadTaskQueue.Task task;
+        private final TaskQueue.Task task;
         private volatile int status;
+        private final boolean isCore;
 
-        public Worker(BlockThreadTaskQueue.Task task) {
+        public Worker(TaskQueue.Task task, boolean isCore) {
             this.task = task;
             this.thread = getThreadFactory().newThread(this);
             this.status = RUNNING;
+            this.isCore = isCore;
+
+            this.thread.start();
         }
 
-        public void runTask(BlockThreadTaskQueue.Task task) {
+        public void runTask(TaskQueue.Task task) {
             task.run();
             taskQueue.finishTask(task);
         }
@@ -50,13 +58,23 @@ public class TaskGroupThreadPool {
             }
             while (true) {
                 status = WAITING;
-                BlockThreadTaskQueue.Task task = taskQueue.poll(true);
+                TaskQueue.Task task;
+                try {
+                    task = getTask(isCore);
+                } catch (InterruptedException e) {
+                    task = null;
+                }
                 if (task == null) break;
                 status = RUNNING;
                 runTask(task);
             }
-            status = STOPED;
-            mainCondition.signal();
+            mainLock.lock();
+            try {
+                status = STOPED;
+                mainCondition.signal();
+            } finally {
+                mainLock.unlock();
+            }
         }
 
         public int getStatus() {
@@ -64,7 +82,18 @@ public class TaskGroupThreadPool {
         }
     }
 
-    public TaskGroupThreadPool(int coreThreadSize, int maxThreadSize, Duration keepAliveTime, ThreadFactory threadFactory, BlockThreadTaskQueue taskQueue) {
+    private TaskQueue.Task getTask(boolean isCore) throws InterruptedException {
+        TaskQueue.Task task = taskQueue.poll();
+        if (task != null) return task;
+        if (isCore) {
+            LockSupport.park();
+        } else {
+            LockSupport.parkNanos(keepAliveTime.toNanos());
+        }
+        return taskQueue.poll();
+    }
+
+    public TaskGroupThreadPool(int coreThreadSize, int maxThreadSize, Duration keepAliveTime, ThreadFactory threadFactory, TaskQueue taskQueue) {
         this.coreWorkers = new Worker[coreThreadSize];
         this.additionalWorkers = new Worker[maxThreadSize - coreThreadSize];
         this.coreThreadSize = coreThreadSize;
@@ -75,30 +104,27 @@ public class TaskGroupThreadPool {
         this.status = RUNNING;
     }
 
-    public void exec(BlockThreadTaskQueue.Task task) {
+    public void exec(TaskQueue.Task task) {
         if (status == WAITING) return;
-
-        // 任务丢到队列里
-        taskQueue.push(task);
-
-        task = taskQueue.poll(false);
+        // 判断能不能直接计算
+        task = taskQueue.tryPoll(task);
         if (task != null) {
-            System.out.println("增加工人");
             // 核心线程有没有空余地方
             Worker idleWorker = findIdleWorker(task, true);
-            if (workerRun(idleWorker)) return;
+            if (idleWorker != null) return;
 
             // 附加线程有没有空余地方
             idleWorker = findIdleWorker(task, false);
-            if (workerRun(idleWorker)) return;
-        }
+            if (idleWorker != null) return;
 
-        System.out.println("没地方了");
+            System.out.println("没地方了");
+            taskQueue.push(task);
+        }
 
 
     }
 
-    private Worker findIdleWorker(BlockThreadTaskQueue.Task task, boolean inCore) {
+    private Worker findIdleWorker(TaskQueue.Task task, boolean inCore) {
         Worker idleWorker = null;
         Worker[] workers = coreWorkers;
         int workerPoolSize = coreThreadSize;
@@ -108,9 +134,17 @@ public class TaskGroupThreadPool {
         }
         for (int i = 0; i < workerPoolSize; i++) {
             Worker worker = workers[i];
-            if (worker == null) {
-                worker = new Worker(task);
+            if (worker == null || worker.getStatus() == STOPED) {
+                System.out.println("增加工人");
+                worker = new Worker(task, inCore);
                 workers[i] = worker;
+                idleWorker = worker;
+                break;
+            }
+            if (worker.getStatus() == WAITING) {
+                System.out.println("通知工人工作");
+                taskQueue.push(task);
+                LockSupport.unpark(worker.thread);
                 idleWorker = worker;
                 break;
             }
@@ -123,15 +157,6 @@ public class TaskGroupThreadPool {
             if (worker == null) continue;
             consumer.accept(worker);
         }
-    }
-
-    private boolean workerRun(Worker worker) {
-        if (worker != null) {
-            // 新建了一个工作者，启动
-            worker.thread.start();
-            return true;
-        }
-        return false;
     }
 
     public void shutdown() {
